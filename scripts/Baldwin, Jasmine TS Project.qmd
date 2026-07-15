@@ -1,0 +1,343 @@
+---
+title: "Project - STAT 6313"
+author: Baldwin, Jamie
+format: 
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    code-line-numbers: true
+    code-summary: "SHOW ME THE CODE!"
+    code-tools: true
+    theme: sketchy
+editor: visual
+---
+
+```{=html}
+<style>
+body {
+    background-color: #EAF4FF; /* soft pastel blue background */
+    color: #2F4F6F;            /* muted navy text */
+}
+
+/* Active tab (when selected) */
+.nav-tabs .nav-link.active {
+    background-color: #BFDFFF;  /* active tab background */
+    color: #2F4F6F;             /* active tab text */
+}
+
+/* Highlighted text */
+.highlight {
+    background-color: #4DA3FF;  /* bright accent blue */
+    color: white;
+    padding: 2px;
+}
+</style>
+```
+
+# Libraries
+
+```{r Libraries}
+#| message: false
+#| warning: false
+library(tswge)
+library(astsa)
+library(seasonal)
+library(ggplot2)
+library(fpp3)        # For autoplot() and time series functions
+library(scales)      # For dollar_format()
+library(dplyr)       # For %>% pipe operator
+library(gridExtra) # Required for arranging ggplots
+library(tseries)
+library(nnfor)
+library(urca)
+```
+
+# Set Up
+
+```{r SetUp}
+
+###### Finance Rate on Consumer Installment Loans at Commercial Banks, New Autos 60 Month Loan #####
+
+#### Is actually quarter because of how FRED does the survey #### 
+
+auto <- read.csv("C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\STAT 6313 Robertson\\Project\\RIFLPBCIANM60NM.csv")
+```
+
+# Cleaning & Viewing the Dataset
+
+```{r Data Cleaning, cache=TRUE}
+
+## Dropping the NA months
+clean_auto <- auto %>%
+  drop_na(RIFLPBCIANM60NM) %>%
+  arrange(observation_date) # Ensure they are in chronological order
+
+## Verify we have 79 clean, consecutive points
+# print(nrow(clean_auto))  #VERIFIED :)
+
+## Extract just the rates
+
+auto_rates <- clean_auto$RIFLPBCIANM60NM
+
+n = length(auto_rates)
+test_size = 8 ## Holding out the last 24 months (4 quarters * 2 years = 8) for the competition
+
+## Create Train and Test sets
+train = auto_rates[1:(n - test_size)]
+test = auto_rates[(n - test_size + 1):n]
+
+## Plot the Realization, Sample Autocorrelations, and Spectral Density of the Training Set
+invisible(plotts.sample.wge(train))
+```
+
+From the realization, we can see that the data does NOT hover around a constant mean. Quickly violating the definition of stationarity, meaning we can conclude this dataset is NOT stationary. In addition to not being stationary, we can see that it drops smoothly from 8% down to right above 4%, and then it starts to climb but upwards. It "wanders" wherever the economy takes it.
+
+Our Sample Autocorrelations plot, agree with our findings from the realization as it starts at 1.0 and decays incredibly slowly. It seems to take about 16 lags just to cross the zero line. This indicates non-stationarity as in a stationary series, it would drop to zero within the first two or three lags. In addition to non-stationarity, our ACF plot also shows no since of a cyclic pattern. If there were seasonal effects , we would see little bumps every 4 lags (since we have established this data is quarterly).
+
+The Spectral Density plot shows a massive, dominant peak at $f=0$, and the then the variance drops exponentially as the frequency increases. A peak at $f=0$ is the mathematical signature of a trend or wandering behavior. While we can see a small bump at $f=0.23$, this is significantly weaker than the spike at $f=0$. This means there *might* be a small hint of a seasonal pattern, however due to how weak in comparison to the wandering behavior, I do not feel comfortable acting upon in as of right now. As this could also just be a hiccup from the Parzen Window Smoothing and not a real indicator of seasonality.
+
+Overall, these finding make sense as interest rates are heavily managed by the Federal Reserve. Meaning they move in prolonged trends (hiking cycles/cutting cycles) rather than bouncing randomly around a fixed historical average. After we apply the first difference we will better be able to see if that hint of a annual cycle is real and then perhaps be able to build a model taking seasonality into account. If it is indeed just noise, the first difference will make it disappear.
+
+# Testing for Unit Roots (ARIMA vs. ARMA)
+
+Since our series shows since of wandering behavior, we will need to mathematically confirm if it contains a "unit root". This will help us identify if we need to fit an ARIMA model (differenced) or an ARMA Model. To do so we will be using the Augmented Dickey-Fuller (ADF) and KPSS Tests.
+
+```{r Testing for Unit Roots, cache=TRUE}
+cat("\n--- UNIT ROOT TESTS ---\n")
+###### Augmented Dickey-Fuller Test #####
+## Null Hypothesis: The data has a unit root (is non-stationary)
+## Alt Hypothesis: The data has NO unit root (is stationary)
+adf_test = ur.df(train, type='drift', selectlags='AIC')
+summary(adf_test)
+
+##### KPSS Test #####
+## Null Hypothesis: The data is stationary
+## Alt Hypothesis: The data is NOT stationary
+kpss_test = ur.kpss(train, type='mu', lags='short')
+summary(kpss_test)
+```
+
+Based on our Augmented Dickey-Fuller test, we can fail to reject the null hypothesis. This is because we can see that our test statistic is -2.2454 with the 5% critical value being -2.89. Meaning our test statistics is less than our 5% critical value, which tells us to fail to reject our null. Thus we can conclude that there is NOT enough evidence to support that the data is stationary and has no unit root. Indicating we should most likely include a unit root in our model.
+
+Our KPSS Unit root test, produces a test statistic of 1.0811 and a 5% critical value of 0.463. Note that our hypotheses for this test is flipped from out ADF hypotheses. This means since our test statistic is greater than our 5% critical value we reject our null hypothesis, that the data is stationary. Indicating that there IS enough evidence to support that the data is non-stationary.
+
+Therefore, based on both of these tests we can conclude that the data is non-stationary (as our visual investigation indicated) and we should include a unit root in our model. Next, we will take the first difference and re-plot the data.
+
+```{r Differencing, cache=TRUE}
+###### Take the First Difference (Assuming tests confirm a unit root) #####
+d1_train = artrans.wge(train, phi.tr=1)
+
+## Plot the differenced data to see if the seasonal bump becomes clearer!
+invisible(plotts.sample.wge(d1_train))
+```
+
+After difference the data we can see how the realization now bounces around a constant mean of zero. The Sample Autocorrelation Plot still does not show a trend for seasonality, if it did we would be seeing the lags spike repeatedly at lags, 4, 8, and 12. However, we lag 4 is lower than lag 3 and lag 8 is barely visible. Our Spectral Density Plot does not show that spike anymore, but we do see a rise around $f=0.30$. Therefore, that hint of annual trend we say in the original data was just noise as suspected.
+
+Now that our data is differenced we can move on to testing if there is a deterministic trend, using the Woodward-Bottone-Gray (WBG) Bootstrap Test.
+
+# Testing for a Deterministic Trend
+
+```{r Testing for a Deterministic Trend, cache=TRUE}
+cat("\n--- WBG TREND TEST ---\n")
+## Null hypothesis: There is NO deterministic linear trend (slope = 0)
+## Alt Hypothesis: There IS a determininstic linear trend
+
+wbg_test = wbg.boot.wge(train)
+wbg_test$pv
+```
+
+Since our WBG Test produced a p-value of 0.593985 which is greater than $\alpha=0.05$ we fail to reject our null hypothesis. Meaning that there is NOT enough evidence to support the alternative, that there IS a deterministic linear trend.
+
+# Building our Models
+
+```{r Models, cache=TRUE}
+cat("\n--- MODEL 1: ARIMA SELECTION ---\n")
+## We'll use AIC to find the best p and q for the differenced data
+#aic5.wge(d1_train, p=0:8, q=0:4)
+
+## smallest p an q from above line plugged into here
+p_val = 2
+q_val = 0
+
+## Estimate the final ARIMA parameters using chosen p and q
+arima_fit = est.arma.wge(d1_train, p=p_val, q=q_val)
+
+cat("\n---ARIMA RESIDUAL ANALYSIS---\n")
+
+ljung.wge(arima_fit$res, p=2, q=0, K=24)
+
+
+cat("\n--- MODEL 2: MULTILAYER PERCEPTRON (MLP) ---\n")
+set.seed(1) ## set seed to ensure reproducability
+
+## We set difforder=1 for the unit root, and allow.det.season=FALSE because we proved there is no seasonality
+fit_mlp = mlp(ts(train, frequency = 4), difforder=1, allow.det.season=FALSE, reps=20)
+
+# Display the architecture of the fitted neural network
+print(fit_mlp)
+plot(fit_mlp)
+```
+
+Our ARIMA Model is a ARIMA(2,1,0), meaning it is using the previous 2 quarters to predict the next one. The p-value from the Ljung-Box Test is 0.9981338 which is greater than 0.05 indicating that we fail to reject our null hypothesis. That is there is not evidence to support that our residuals are NOT white noise. Which is good, this is the result that we want!
+
+Our neural network similarly decided that the change in loan rates from two quarters ago was the only useful information for predicting the future and completely ignored what happened just one month ago!
+
+# Evaluating our Models
+
+```{r Evaluating, cache=TRUE}
+cat("\n---EVALUATION (FORECASTING)---\n")
+## 1. ARIMA Forecast (h = 24 months)
+## We specify d=1 because we differenced the data
+fore_arima = fore.arima.wge(train, d=1, phi=arima_fit$phi, theta=0, 
+                            n.ahead=test_size, plot=FALSE)
+
+## 2. MLP Forecast (h = 24 months)
+fore_mlp = forecast(fit_mlp, h=test_size)
+
+cat("\n---CROWNING THE WINNER (RMSE)---\n")
+## Calculate the RMSE for both models against the 'test' data
+rmse_arima = sqrt(mean((test - fore_arima$f)^2))
+rmse_mlp   = sqrt(mean((test - fore_mlp$mean)^2))
+
+cat("ARIMA(2,1,0) RMSE: ", rmse_arima, "\n")
+cat("MLP Neural Net RMSE: ", rmse_mlp, "\n")
+
+## Plotting the Competition
+time_axis = 1:n
+zoom_start = n - 50
+
+plot(time_axis[zoom_start:n], auto_rates[zoom_start:n], type="l", lwd=2,
+     ylab="Auto Loan Rate", xlab="Months", main="Forecast Competition: Last 24 Months")
+
+## Add the forecast lines for the test period
+lines(time_axis[(n - test_size + 1):n], fore_arima$f, col="red", lwd=2, lty=2)
+lines(time_axis[(n - test_size + 1):n], fore_mlp$mean, col="green", lwd=2, lty=4)
+
+## Add a vertical line to show where the actual forecasts start
+abline(v = n - test_size, col="gray", lty=3)
+
+legend("bottomleft", legend=c("Actual Rates", "ARIMA(2,1,0)", "MLP"), 
+       col=c("black", "red", "green"), lty=c(1,2,4), lwd=2)
+```
+
+Of the two models we can see that the RMSE of the ARIMA(2,1,0) is the higher one at 0.721695 compared to the MLP Neural Network that has an RMSE of 0.5613905. Viewing the plot really puts into perspective how poor both models perform in actuality. However the plot also supports the statistical findings that the ARIMA performed worse. Although, I feel it only performed worse due to it it's predictions following a more upward yet flat pattern where our MLP Neural Network's predictions followed a downward slope. But as George Box said, "All models are bad but some are helpful! Meaning that even though both are incapable of catching the actual behavior of the loan rates they could potentially be helpful.
+
+Due to this conclusion, I wanted to try creating an ensemble model as well as running rolling window RMSE's to evaluate these models.
+
+# Further Modeling (Ensemble)
+
+```{r Ensemble, cache=TRUE}
+cat("\n--- ENSEMBLE FORECAST ---\n")
+## Average the two forecasts together
+ensemble_pred = (fore_arima$f + fore_mlp$mean) / 2
+
+## Calculate the Ensemble RMSE
+rmse_ensemble = sqrt(mean((test - ensemble_pred)^2))
+cat("Ensemble RMSE: ", rmse_ensemble, "\n")
+
+## Plot the final 3-way competition
+time_axis = 1:n
+zoom_start = n - 50
+
+plot(time_axis[zoom_start:n], auto_rates[zoom_start:n], type="l", lwd=2,
+     ylab="Auto Loan Rate", xlab="Months", main="Forecast Competition: Last 24 Months")
+
+## Add the individual forecast lines
+lines(time_axis[(n - test_size + 1):n], fore_arima$f, col="red", lwd=2, lty=2)
+lines(time_axis[(n - test_size + 1):n], fore_mlp$mean, col="green", lwd=2, lty=4)
+
+## Add the new Ensemble forecast line
+lines(time_axis[(n - test_size + 1):n], ensemble_pred, col="purple", lwd=3, lty=1)
+
+abline(v = n - test_size, col="gray", lty=3)
+legend("bottomleft", legend=c("Actual", "ARIMA(2,1,0)", "MLP", "Ensemble"), 
+       col=c("black", "red", "green", "purple"), lty=c(1,2,4,1), lwd=c(2,2,2,3))
+```
+
+While the Ensemble model performed better compared to the ARIMA, it displays how an ensemble CAN be useful if there are two distinctly opposing models (specifically distinctly opposing in this case). So while the ensemble is a superior model when compared to the ARIMA, the MLP Neural Network still wins out of these three.
+
+Next I want to run rolling window RMSEs to see if either model (ARIMA or MLP) does better than our initial RMSEs.
+
+# Rolling Window RMSEs
+
+::: panel-tabset
+## ARIMA (2,1,0)
+
+```{r rolling window, cache=TRUE}
+#| results: hide
+cat("\n--- ROLLING WINDOW RMSE ---\n")
+## 1. ARIMA(2,1,0) Rolling Window
+## We pass the full auto_rates dataset, d=1 for the unit root, and the fitted AR parameters
+rw_arima = roll.win.rmse.wge(auto_rates, horizon = test_size, d = 1, phi = arima_fit$phi)
+cat("ARIMA True Rolling RMSE: ", rw_arima$rwRMSE, "\n")
+```
+
+## MLP Neural Network
+
+```{r RW MLP}
+#| cache: true
+#| results: hide
+
+## 2. MLP Rolling Window
+## We set difforder=1 and allow.det.season=FALSE to match our previous MLP architecture
+## NOTE: we set reps=5 so the computer is not overwhelmbed and does not freeze while rendering!
+set.seed(1)
+fit_mlp_fast = mlp(ts(auto_rates), difforder = 1, allow.det.season = FALSE, reps = 5)
+rw_mlp = roll.win.rmse.nn.wge(auto_rates, horizon = test_size, fit_model = fit_mlp_fast)
+cat("MLP True Rolling RMSE: ", rw_mlp$rwRMSE, "\n")
+```
+:::
+
+The rolling window RMSE shows that both of our models seem to do better than we initially thought as both Rolling Window RMSE's being lower than our original ones. Our ARIMA Rolling Window RMSE being 0.6109956 and our MLP Neural Network being 0.5763165 which still supports our early findings that the MLP Neural Network performs better.
+
+### Table for report
+
+```{r table}
+#| message: false
+#| warning: false
+library(tidyverse)
+library(gt)
+
+## Store the results in a small dataframe
+rmse_results <- tibble(
+  Model = c("ARIMA (2,1,0)", "MLP Neural Network"),
+  Rolling_RMSE = c(rw_arima$rwRMSE, rw_mlp$rwRMSE)
+)
+
+## Build the table
+rmse_results %>%
+  gt() %>%
+  ## titles
+  tab_header(
+    title = md("**Rolling Window RMSE Evaluation**"),
+    subtitle = "Model Performance Comparison (Lower is Better)"
+  ) %>%
+  ## Format numbers to 4 decimal places
+  fmt_number(
+    columns = Rolling_RMSE,
+    decimals = 4
+  ) %>%
+  ## Add a subtle color scale (highlights the winner)
+  data_color(
+    columns = Rolling_RMSE,
+    palette = c("#a8ddb5","#e0f3db") ## Light, professional greens
+  ) %>%
+  ## Clean up the column labels
+  cols_label(
+    Model = md("**Predictive Model**"),
+    Rolling_RMSE = md("**Rolling RMSE**")
+  ) %>%
+  ## Adjust alignment and width
+  tab_options(
+    table.width = pct(60),
+    heading.align = "center",
+    column_labels.background.color = "#f4f4f4"
+  )
+```
+
+# Limitations and Future Considerations
+
+Note that interest rates do not exist in a vacuum; they are heavily influenced by outside economic forces. By only looking at past loan rates, our current models are "blind" to the broader economy that could be helpful. In order to build better models we could collect more data on leading economic indicators such as the Federal Funds Rate, the US Unemployment Rate, or Total Vehicle Sales (Which is on FRED and we have used before in homework), and then use the Cross-Correlation Function to discover possible correlations between these datasets and if a spike in one leads to a spike or decrease in auto loan rates 2 quarters later! We could also create a VAR model with the aforementioned datasets to see if they are able to predict one another and adjust to sudden macroeconomic shocks that our simple ARIMA model could completely miss!
+
+Overall, as this data, auto loan rates are very hard to predict as this data is somewhat similar to stocks which change DAILY any model will not be able to predict the next quarter or month very accurately. However, once again while our models are wrong/bad they can be helpful, instead we could potentially focus the models to simply predict if the loan rate with rise or fall and focus less on predicting the actual value of the loan rate.
